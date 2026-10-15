@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""
+Project 1: Motion-Activated Alarm
+PIR sensor + buzzer on the Pi, LEDs and LCD via Arduino (USB serial), servo via PCA9685.
+
+Wiring:
+  PIR sensor      GPIO 27
+  Buzzer          GPIO 22
+  Reset button    GPIO 4   (3-pin module, idles HIGH, LOW when pressed)
+  PCA9685         I2C (pins 3/5), servo on channel 0, V+ from external 5V
+  Arduino         /dev/ttyUSB0, alarm LED on D8, status LED on D9, LCD on A4/A5
+"""
+
+from datetime import datetime
+from time import sleep
+
+import serial
+from gpiozero import MotionSensor, Buzzer, Button
+from adafruit_servokit import ServoKit
+
+PIR_PIN = 27
+BUZZER_PIN = 22
+BUTTON_PIN = 4
+SERIAL_PORT = "/dev/ttyUSB0"
+SERVO_CHANNEL = 0
+
+# Create all component objects
+pir = MotionSensor(PIR_PIN)
+buzzer = Buzzer(BUZZER_PIN)
+button = Button(BUTTON_PIN, pull_up=None, active_state=False, bounce_time=0.05)
+
+servo = None
+try:
+    kit = ServoKit(channels=16)
+    servo = kit.servo[SERVO_CHANNEL]
+except Exception as exc:
+    print(f"WARNING: PCA9685 not responding ({exc}) - running without the servo")
+
+arduino = serial.Serial(SERIAL_PORT, 9600, timeout=1)
+sleep(2)  # the Arduino resets when the port opens - give it time to boot
+
+detection_count = 0
+
+
+def send(cmd):
+    """Send a one-line command to the Arduino (ALARM, COUNT n, RESET, STATUS_ON, STATUS_OFF)."""
+    arduino.write((cmd + "\n").encode())
+
+
+def timestamp():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def trigger_alarm():
+    """Activate all alarm components"""
+    global detection_count
+    detection_count += 1
+    print(f"[{timestamp()}] ALARM! Motion detected! (detection #{detection_count})")
+
+    # Arduino flashes the alarm LED until RESET, and shows the count on the LCD
+    send("ALARM")
+    send(f"COUNT {detection_count}")
+
+    # Beep the buzzer 5 times
+    print("Activating alarm sequence...")
+    for i in range(5):
+        buzzer.on()
+        sleep(0.2)
+        buzzer.off()
+        sleep(0.2)
+
+    # Move servo to alert positions
+    if servo is not None:
+        print("Servo scanning...")
+        servo.angle = 180  # Full right
+        sleep(1)
+        servo.angle = 0    # Full left
+        sleep(1)
+        servo.angle = 90   # Return to center
+        sleep(0.5)
+
+
+def reset_system():
+    """Clear the count, stop the alarm LED, re-arm"""
+    global detection_count
+    print(f"[{timestamp()}] RESET - {detection_count} detection(s) cleared")
+    detection_count = 0
+    buzzer.off()
+    if servo is not None:
+        servo.angle = 90
+    send("RESET")
+    print("Security system re-armed!")
+
+
+# Set up motion detection and reset button
+pir.when_motion = trigger_alarm
+button.when_pressed = reset_system
+
+print("Security system armed!")
+print("Waiting for motion...")
+print("Press Ctrl+C to quit")
+
+# Initialize servo position, LEDs and LCD (status LED on, alarm LED off, count 0)
+if servo is not None:
+    servo.angle = 90
+send("RESET")
+
+try:
+    # Keep program running
+    while True:
+        sleep(1)
+except KeyboardInterrupt:
+    print(f"\n[{timestamp()}] System disarmed after {detection_count} detection(s)")
+    if servo is not None:
+        servo.angle = 90
+    buzzer.off()
+    send("STATUS_OFF")
+    arduino.close()
